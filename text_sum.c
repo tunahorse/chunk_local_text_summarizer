@@ -8,36 +8,33 @@
 #define MAX_SENTENCE_LENGTH 1000
 #define MAX_WORDS 100000
 #define MAX_WORD_LENGTH 100
-#define MAX_TEXT_LENGTH 1000000  
+#define MAX_TEXT_LENGTH 1000000
 
 typedef struct {
-    char *word;
-    int count;
-    double tf_idf;
-} WordFreq;
+    char *content;
+    double score;
+    int index;
+} Sentence;
 
-
-
-void toLowerCase(char *str);
-void tokenizeSentences(char *text, char **sentences, int *sentenceCount);
-void tokenizeWords(char *text, char **words, int *wordCount);
+void tokenizeSentences(char *text, Sentence **sentences, int *sentenceCount);
+void tokenizeWords(char *sentence, char **words, int *wordCount);
 int isStopWord(char *word);
-void calculateWordFrequencies(char **words, int wordCount, WordFreq **wordFreq, int *uniqueWordCount);
-void calculateTFIDF(WordFreq *wordFreq, int uniqueWordCount, int sentenceCount);
-void scoreSentences(char **sentences, int sentenceCount, WordFreq *wordFreq, int uniqueWordCount, double *sentenceScores);
-void summarize(char **sentences, int sentenceCount, double *sentenceScores, int numSentences, FILE *outputFile);
+double calculateSimilarity(char *sentence1, char *sentence2);
+void textRank(Sentence **sentences, int sentenceCount, int iterations);
+int compareSentences(const void *a, const void *b);
+void summarize(Sentence **sentences, int sentenceCount, int numSentences, FILE *outputFile);
 char* readFile(const char *filename);
-void writeFile(const char *filename, char **sentences, int sentenceCount, double *sentenceScores, int numSentences);
+void writeFile(const char *filename, Sentence **sentences, int sentenceCount, int numSentences);
 
 int main(int argc, char *argv[]) {
     if (argc != 4) {
-        printf("Usage: %s <input_file> <output_file> <summary_length>\n", argv[0]);
+        printf("Usage: %s <input_file> <output_file> <summary_percentage>\n", argv[0]);
         return 1;
     }
 
     const char *inputFile = argv[1];
     const char *outputFile = argv[2];
-    int summaryLength = atoi(argv[3]);
+    double summaryPercentage = atof(argv[3]);
 
     char *text = readFile(inputFile);
     if (text == NULL) {
@@ -45,80 +42,72 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    char **sentences = malloc(MAX_SENTENCES * sizeof(char *));
+    Sentence *sentences[MAX_SENTENCES];
     int sentenceCount = 0;
-    char **words = malloc(MAX_WORDS * sizeof(char *));
-    int wordCount = 0;
-    WordFreq *wordFreq = NULL;
-    int uniqueWordCount = 0;
-    double *sentenceScores = calloc(MAX_SENTENCES, sizeof(double));
 
     tokenizeSentences(text, sentences, &sentenceCount);
-    printf("Sentences tokenized. Count: %d\n", sentenceCount);
+    int numSentences = ceil(sentenceCount * summaryPercentage / 100.0);
 
-    tokenizeWords(text, words, &wordCount);
-    printf("Words tokenized. Count: %d\n", wordCount);
+    textRank(sentences, sentenceCount, 20);  // 20 iterations for TextRank
 
-    calculateWordFrequencies(words, wordCount, &wordFreq, &uniqueWordCount);
-    printf("Word frequencies calculated. Unique words: %d\n", uniqueWordCount);
+    writeFile(outputFile, sentences, sentenceCount, numSentences);
 
-    calculateTFIDF(wordFreq, uniqueWordCount, sentenceCount);
-    printf("TF-IDF calculated.\n");
-
-    scoreSentences(sentences, sentenceCount, wordFreq, uniqueWordCount, sentenceScores);
-    printf("Sentences scored.\n");
-
-    writeFile(outputFile, sentences, sentenceCount, sentenceScores, summaryLength);
     printf("Summary written to %s\n", outputFile);
+    printf("Total sentences in summary: %d\n", numSentences);
 
     // Free allocated memory
     free(text);
     for (int i = 0; i < sentenceCount; i++) {
+        free(sentences[i]->content);
         free(sentences[i]);
     }
-    free(sentences);
-    for (int i = 0; i < wordCount; i++) {
-        free(words[i]);
-    }
-    free(words);
-    for (int i = 0; i < uniqueWordCount; i++) {
-        free(wordFreq[i].word);
-    }
-    free(wordFreq);
-    free(sentenceScores);
 
     return 0;
 }
 
-void toLowerCase(char *str) {
-    for (int i = 0; str[i]; i++) {
-        str[i] = tolower(str[i]);
-    }
-}
-
-void tokenizeSentences(char *text, char **sentences, int *sentenceCount) {
-    char *saveptr;
-    char *sentence = strtok_r(text, ".!?", &saveptr);
-    while (sentence != NULL && *sentenceCount < MAX_SENTENCES) {
-        while (*sentence == ' ' || *sentence == '\n' || *sentence == '\t') {
-            sentence++;
+void tokenizeSentences(char *text, Sentence **sentences, int *sentenceCount) {
+    char *start = text;
+    char *end;
+    while (*start && *sentenceCount < MAX_SENTENCES) {
+        // Find the end of the sentence
+        end = strpbrk(start, ".!?");
+        if (end == NULL) {
+            break;  // No more sentences
         }
-        sentences[*sentenceCount] = strdup(sentence);
+        
+        // Allocate memory for the sentence
+        int length = end - start + 1;
+        char *sentenceContent = malloc(length + 1);
+        strncpy(sentenceContent, start, length);
+        sentenceContent[length] = '\0';
+        
+        // Create the Sentence struct
+        sentences[*sentenceCount] = malloc(sizeof(Sentence));
+        sentences[*sentenceCount]->content = sentenceContent;
+        sentences[*sentenceCount]->score = 1.0;  // Initial score
+        sentences[*sentenceCount]->index = *sentenceCount;
+        
         (*sentenceCount)++;
-        sentence = strtok_r(NULL, ".!?", &saveptr);
+        
+        // Move to the start of the next sentence
+        start = end + 1;
+        while (*start && isspace((unsigned char)*start)) {
+            start++;
+        }
     }
 }
 
-void tokenizeWords(char *text, char **words, int *wordCount) {
-    char *saveptr;
-    char *word = strtok_r(text, " \t\n\r\f\v,.-!?()[]{}:;\"'", &saveptr);
+void tokenizeWords(char *sentence, char **words, int *wordCount) {
+    char *word = strtok(sentence, " \t\n\r\f\v,.-!?()[]{}:;\"'");
     while (word != NULL && *wordCount < MAX_WORDS) {
-        toLowerCase(word);
+        for (int i = 0; word[i]; i++) {
+            word[i] = tolower(word[i]);
+        }
         if (strlen(word) > 0 && !isStopWord(word)) {
             words[*wordCount] = strdup(word);
             (*wordCount)++;
         }
-        word = strtok_r(NULL, " \t\n\r\f\v,.-!?()[]{}:;\"'", &saveptr);
+        word = strtok(NULL, " \t\n\r\f\v,.-!?()[]{}:;\"'");
     }
 }
 
@@ -134,56 +123,77 @@ int isStopWord(char *word) {
     return 0;
 }
 
-void calculateWordFrequencies(char **words, int wordCount, WordFreq **wordFreq, int *uniqueWordCount) {
-    *wordFreq = malloc(wordCount * sizeof(WordFreq));
-    *uniqueWordCount = 0;
+double calculateSimilarity(char *sentence1, char *sentence2) {
+    char *words1[MAX_WORDS];
+    char *words2[MAX_WORDS];
+    int wordCount1 = 0, wordCount2 = 0;
+    
+    char *sent1Copy = strdup(sentence1);
+    char *sent2Copy = strdup(sentence2);
+    
+    tokenizeWords(sent1Copy, words1, &wordCount1);
+    tokenizeWords(sent2Copy, words2, &wordCount2);
 
-    for (int i = 0; i < wordCount; i++) {
-        int found = 0;
-        for (int j = 0; j < *uniqueWordCount; j++) {
-            if (strcmp(words[i], (*wordFreq)[j].word) == 0) {
-                (*wordFreq)[j].count++;
-                found = 1;
+    int commonWords = 0;
+    for (int i = 0; i < wordCount1; i++) {
+        for (int j = 0; j < wordCount2; j++) {
+            if (strcmp(words1[i], words2[j]) == 0) {
+                commonWords++;
                 break;
             }
         }
-        if (!found) {
-            (*wordFreq)[*uniqueWordCount].word = strdup(words[i]);
-            (*wordFreq)[*uniqueWordCount].count = 1;
-            (*wordFreq)[*uniqueWordCount].tf_idf = 0.0;
-            (*uniqueWordCount)++;
-        }
     }
+
+    double similarity = (double)commonWords / (log(wordCount1 + 1) + log(wordCount2 + 1));
+
+    for (int i = 0; i < wordCount1; i++) free(words1[i]);
+    for (int i = 0; i < wordCount2; i++) free(words2[i]);
+    free(sent1Copy);
+    free(sent2Copy);
+
+    return similarity;
 }
 
-void calculateTFIDF(WordFreq *wordFreq, int uniqueWordCount, int sentenceCount) {
-    for (int i = 0; i < uniqueWordCount; i++) {
-        double tf = (double)wordFreq[i].count / sentenceCount;
-        double idf = log((double)sentenceCount / wordFreq[i].count);
-        wordFreq[i].tf_idf = tf * idf;
-    }
-}
+void textRank(Sentence **sentences, int sentenceCount, int iterations) {
+    double d = 0.85;  // Damping factor
 
-void scoreSentences(char **sentences, int sentenceCount, WordFreq *wordFreq, int uniqueWordCount, double *sentenceScores) {
-    for (int i = 0; i < sentenceCount; i++) {
-        char *sentence = strdup(sentences[i]);
-        toLowerCase(sentence);
-        
-        char *word;
-        char *saveptr;
-        word = strtok_r(sentence, " \t\n\r\f\v,.-!?()[]{}:;\"'", &saveptr);
-        
-        while (word != NULL) {
-            for (int j = 0; j < uniqueWordCount; j++) {
-                if (strcmp(word, wordFreq[j].word) == 0) {
-                    sentenceScores[i] += wordFreq[j].tf_idf;
-                    break;
+    for (int iter = 0; iter < iterations; iter++) {
+        for (int i = 0; i < sentenceCount; i++) {
+            double score = 1 - d;
+            for (int j = 0; j < sentenceCount; j++) {
+                if (i != j) {
+                    double similarity = calculateSimilarity(sentences[i]->content, sentences[j]->content);
+                    score += d * similarity * sentences[j]->score;
                 }
             }
-            word = strtok_r(NULL, " \t\n\r\f\v,.-!?()[]{}:;\"'", &saveptr);
+            sentences[i]->score = score;
         }
-        
-        free(sentence);
+    }
+}
+
+int compareSentences(const void *a, const void *b) {
+    Sentence *s1 = *(Sentence **)a;
+    Sentence *s2 = *(Sentence **)b;
+    if (s1->score > s2->score) return -1;
+    if (s1->score < s2->score) return 1;
+    return s1->index - s2->index;  // Maintain original order for equal scores
+}
+
+void summarize(Sentence **sentences, int sentenceCount, int numSentences, FILE *outputFile) {
+    qsort(sentences, sentenceCount, sizeof(Sentence*), compareSentences);
+    
+    // Select top sentences
+    Sentence *selectedSentences[MAX_SENTENCES];
+    for (int i = 0; i < numSentences && i < sentenceCount; i++) {
+        selectedSentences[i] = sentences[i];
+    }
+
+    // Sort selected sentences by their original index
+    qsort(selectedSentences, numSentences, sizeof(Sentence*), compareSentences);
+
+    // Output sentences in original order
+    for (int i = 0; i < numSentences && i < sentenceCount; i++) {
+        fprintf(outputFile, "%s\n", selectedSentences[i]->content);
     }
 }
 
@@ -218,7 +228,7 @@ char* readFile(const char *filename) {
     return buffer;
 }
 
-void writeFile(const char *filename, char **sentences, int sentenceCount, double *sentenceScores, int numSentences) {
+void writeFile(const char *filename, Sentence **sentences, int sentenceCount, int numSentences) {
     FILE *file = fopen(filename, "w");
     if (file == NULL) {
         printf("Error opening output file: %s\n", filename);
@@ -226,38 +236,7 @@ void writeFile(const char *filename, char **sentences, int sentenceCount, double
     }
 
     fprintf(file, "Summary:\n\n");
-    summarize(sentences, sentenceCount, sentenceScores, numSentences, file);
+    summarize(sentences, sentenceCount, numSentences, file);
 
     fclose(file);
-}
-
-void summarize(char **sentences, int sentenceCount, double *sentenceScores, int numSentences, FILE *outputFile) {
-    int *topSentences = (int *)malloc(numSentences * sizeof(int));
-    for (int i = 0; i < numSentences; i++) {
-        topSentences[i] = -1;
-        double maxScore = -1;
-        for (int j = 0; j < sentenceCount; j++) {
-            if (sentenceScores[j] > maxScore) {
-                int alreadySelected = 0;
-                for (int k = 0; k < i; k++) {
-                    if (topSentences[k] == j) {
-                        alreadySelected = 1;
-                        break;
-                    }
-                }
-                if (!alreadySelected) {
-                    maxScore = sentenceScores[j];
-                    topSentences[i] = j;
-                }
-            }
-        }
-    }
-
-    for (int i = 0; i < numSentences; i++) {
-        if (topSentences[i] != -1) {
-            fprintf(outputFile, "%s.\n\n", sentences[topSentences[i]]);
-        }
-    }
-
-    free(topSentences);
 }
